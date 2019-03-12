@@ -1,6 +1,4 @@
 # General imports
-import argparse
-
 import os
 import sys
 from multiprocessing.pool import ThreadPool
@@ -9,7 +7,6 @@ import tornado.gen
 import tornado.httpserver
 import tornado.ioloop
 import tornado.web
-import tornado.netutil
 from raven.contrib.tornado import AsyncSentryClient
 import redis
 
@@ -19,7 +16,7 @@ from common.ddog import datadogClient
 from common.log import logUtils as log
 from common.redis import pubSub
 from common.web import schiavo
-from handlers import apiCacheBeatmapHandler, rateHandler, changelogHandler
+from handlers import apiCacheBeatmapHandler
 from handlers import apiPPHandler
 from handlers import apiStatusHandler
 from handlers import banchoConnectHandler
@@ -27,6 +24,7 @@ from handlers import checkUpdatesHandler
 from handlers import defaultHandler
 from handlers import downloadMapHandler
 from handlers import emptyHandler
+from handlers import rateHandler
 from handlers import getFullReplayHandler
 from handlers import getReplayHandler
 from handlers import getScoresHandler
@@ -46,7 +44,6 @@ from common import generalUtils
 from common import agpl
 from objects import glob
 from pubSubHandlers import beatmapUpdateHandler
-import secret.achievements.utils
 
 
 def make_app():
@@ -56,22 +53,21 @@ def make_app():
 		(r"/web/osu-submit-modular.php", submitModularHandler.handler),
 		(r"/web/osu-submit-modular-selector.php", submitModularHandler.handler),
 		(r"/web/osu-getreplay.php", getReplayHandler.handler),
+		(r"/web/osu-rate.php", rateHandler.handler),
 		(r"/web/osu-screenshot.php", uploadScreenshotHandler.handler),
 		(r"/web/osu-search.php", osuSearchHandler.handler),
 		(r"/web/osu-search-set.php", osuSearchSetHandler.handler),
 		(r"/web/check-updates.php", checkUpdatesHandler.handler),
 		(r"/web/osu-error.php", osuErrorHandler.handler),
 		(r"/web/osu-comment.php", commentHandler.handler),
-		(r"/web/osu-rate.php", rateHandler.handler),
-        (r"/p/changelog", changelogHandler.handler),
 		(r"/ss/(.*)", getScreenshotHandler.handler),
 		(r"/web/maps/(.*)", mapsHandler.handler),
 		(r"/d/(.*)", downloadMapHandler.handler),
 		(r"/s/(.*)", downloadMapHandler.handler),
 		(r"/web/replays/(.*)", getFullReplayHandler.handler),
 
-		(r"/p/verify", redirectHandler.handler, dict(destination="https://ripple.moe/index.php?p=2")),
-		(r"/u/(.*)", redirectHandler.handler, dict(destination="https://ripple.moe/index.php?u={}")),
+		(r"/p/verify", redirectHandler.handler, dict(destination="https://akatsuki.pw/index.php?p=2")),
+		(r"/u/(.*)", redirectHandler.handler, dict(destination="https://akatsuki.pw/u/{}")),
 
 		(r"/api/v1/status", apiStatusHandler.handler),
 		(r"/api/v1/pp", apiPPHandler.handler),
@@ -84,22 +80,12 @@ def make_app():
 		# Not done yet
 		(r"/web/lastfm.php", emptyHandler.handler),
 		(r"/web/osu-checktweets.php", emptyHandler.handler),
-		(r"/web/osu-addfavourite.php", emptyHandler.handler),
 
 		(r"/loadTest", loadTestHandler.handler),
 	], default_handler_class=defaultHandler.handler)
 
 
 if __name__ == "__main__":
-	parser = argparse.ArgumentParser(
-		description=consoleHelper.ASCII + "\n\nLatest Essential Tatoe Server v{}\nBy The Ripple Team".format(
-			glob.VERSION
-		),
-		formatter_class=argparse.RawTextHelpFormatter
-	)
-	parser.add_argument("-p", "--port", help="Run on a specific port (bypasses config.ini)", required=False)
-	cli_args = parser.parse_args()
-
 	# AGPL license agreement
 	try:
 		agpl.check_license("ripple", "LETS")
@@ -134,11 +120,11 @@ if __name__ == "__main__":
 		consoleHelper.printNoNl("> Checking folders... ")
 		paths = [
 			".data",
-			glob.conf.config["server"]["replayspath"],
-			glob.conf.config["server"]["screenshotspath"],
+			".data/replays",
+			".data/screenshots",
 			".data/oppai",
 			".data/catch_the_pp",
-			glob.conf.config["server"]["beatmapspath"]
+			".data/beatmaps"
 		]
 		for i in paths:
 			if not os.path.exists(i):
@@ -196,32 +182,9 @@ if __name__ == "__main__":
 			if int(glob.conf.config["server"]["beatmapcacheexpire"]) > 0:
 				consoleHelper.printColored("[!] IMPORTANT! Your beatmapcacheexpire in config.ini is > 0 and osu!api features are disabled.\nWe do not reccoment this, because too old beatmaps will be shown as unranked.\nSet beatmapcacheexpire to 0 to disable beatmap latest update check and fix that issue.", bcolors.YELLOW)
 
-		# Load achievements
-		consoleHelper.printNoNl("Loading achievements... ")
-		try:
-			secret.achievements.utils.load_achievements()
-		except Exception as e:
-			consoleHelper.printError()
-			consoleHelper.printColored(
-				"[!] Error while loading achievements! ({})".format(e),
-				bcolors.RED,
-			)
-			sys.exit()
-		consoleHelper.printDone()
-
 		# Set achievements version
 		glob.redis.set("lets:achievements_version", glob.ACHIEVEMENTS_VERSION)
 		consoleHelper.printColored("Achievements version is {}".format(glob.ACHIEVEMENTS_VERSION), bcolors.YELLOW)
-
-		# Load AQL thresholds
-		print("Loading AQL thresholds... ")
-		try:
-			glob.aqlThresholds.reload()
-		except Exception as e:
-			consoleHelper.printError()
-			consoleHelper.printColored("[!] {}".format(e), bcolors.RED,)
-			sys.exit()
-		consoleHelper.printDone()
 
 		# Discord
 		if generalUtils.stringToBool(glob.conf.config["discord"]["enable"]):
@@ -236,11 +199,7 @@ if __name__ == "__main__":
 
 		# Server port
 		try:
-			if cli_args.port:
-				consoleHelper.printColored("[!] Running on port {}, bypassing config.ini", bcolors.YELLOW)
-				glob.serverPort = int(cli_args.port)
-			else:
-				glob.serverPort = int(glob.conf.config["server"]["port"])
+			serverPort = int(glob.conf.config["server"]["port"])
 		except:
 			consoleHelper.printColored("[!] Invalid server port! Please check your config.ini and run the server again", bcolors.RED)
 
@@ -260,11 +219,7 @@ if __name__ == "__main__":
 		# Set up Datadog
 		try:
 			if generalUtils.stringToBool(glob.conf.config["datadog"]["enable"]):
-				glob.dog = datadogClient.datadogClient(
-					glob.conf.config["datadog"]["apikey"],
-					glob.conf.config["datadog"]["appkey"],
-					constant_tags=["worker:{}".format(glob.serverPort)]
-				)
+				glob.dog = datadogClient.datadogClient(glob.conf.config["datadog"]["apikey"], glob.conf.config["datadog"]["appkey"])
 			else:
 				consoleHelper.printColored("[!] Warning! Datadog stats tracking is disabled!", bcolors.YELLOW)
 		except:
@@ -273,18 +228,14 @@ if __name__ == "__main__":
 		# Connect to pubsub channels
 		pubSub.listener(glob.redis, {
 			"lets:beatmap_updates": beatmapUpdateHandler.handler(),
-			"lets:reload_aql": lambda x: x == b"reload" and glob.aqlThresholds.reload(),
 		}).start()
 
 		# Server start message and console output
-		consoleHelper.printColored("> L.E.T.S. is listening for clients on {}:{}...".format(
-			glob.conf.config["server"]["host"],
-			glob.serverPort
-		), bcolors.GREEN)
-		log.logMessage("Server started!", discord="bunker", stdout=False)
+		consoleHelper.printColored("> L.E.T.S. is listening for clients on {}:{}...".format(glob.conf.config["server"]["host"], serverPort), bcolors.GREEN)
+		log.logMessage("Server started!", discord="bunker", of="info.txt", stdout=False)
 
 		# Start Tornado
-		glob.application.listen(glob.serverPort, address=glob.conf.config["server"]["host"])
+		glob.application.listen(serverPort, address=glob.conf.config["server"]["host"])
 		tornado.ioloop.IOLoop.instance().start()
 	finally:
 		# Perform some clean up
