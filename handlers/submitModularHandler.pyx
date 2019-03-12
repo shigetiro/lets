@@ -9,12 +9,14 @@ from urllib.parse import urlencode
 import requests
 import tornado.gen
 import tornado.web
+import math
 
 import secret.achievements.utils
 from common.constants import gameModes
 from common.constants import mods
 from common.log import logUtils as log
 from common.ripple import userUtils
+from common.ripple import scoreUtils
 from common.web import requestsManager
 from constants import exceptions
 from constants import rankedStatuses
@@ -22,13 +24,15 @@ from constants.exceptions import ppCalcException
 from helpers import aeshelper
 from helpers import replayHelper
 from helpers import leaderboardHelper
-from helpers.generalHelper import zingonify
 from objects import beatmap
 from objects import glob
 from objects import score
 from objects import scoreboard
+from objects import relaxboard
+from objects import rxscore
+from helpers.generalHelper import zingonify
 from objects.charts import BeatmapChart, OverallChart
-from secret import butterCake
+from common import generalUtils
 
 MODULE_NAME = "submit_modular"
 class handler(requestsManager.asyncRequestHandler):
@@ -80,8 +84,7 @@ class handler(requestsManager.asyncRequestHandler):
 			# Get score data
 			log.debug("Decrypting score data...")
 			scoreData = aeshelper.decryptRinjdael(aeskey, iv, scoreDataEnc, True).split(":")
-			if len(scoreData) < 16 or len(scoreData[0]) != 32:
-				return
+
 			username = scoreData[1].strip()
 
 			# Login and ban check
@@ -89,18 +92,6 @@ class handler(requestsManager.asyncRequestHandler):
 			# User exists check
 			if userID == 0:
 				raise exceptions.loginFailedException(MODULE_NAME, userID)
-
-			# Score submission lock check
-			lock_key = "lets:score_submission_lock:{}:{}:{}".format(userID, scoreData[0], int(scoreData[9]))
-			if glob.redis.get(lock_key) is not None:
-				# The same score score is being submitted and it's taking a lot
-				log.warning("Score submission blocked because there's a submission lock in place ({})".format(lock_key))
-				return
-
-			# Set score submission lock
-			log.debug("Setting score submission lock {}".format(lock_key))
-			glob.redis.set(lock_key, "1", 120)
-
 			# Bancho session/username-pass combo check
 			if not userUtils.checkLogin(userID, password, ip):
 				raise exceptions.loginFailedException(MODULE_NAME, username)
@@ -121,9 +112,12 @@ class handler(requestsManager.asyncRequestHandler):
 			# Get restricted
 			restricted = userUtils.isRestricted(userID)
 
+			# Get variables for relax
+			used_mods = int(scoreData[13])
+			isRelaxing = used_mods & 128
+
 			# Create score object and set its data
-			log.info("{} has submitted a score on {}...".format(username, scoreData[0]))
-			s = score.score()
+			s = rxscore.score() if isRelaxing else score.score()
 			s.setDataFromScoreData(scoreData)
 
 			if s.completed == -1:
@@ -139,12 +133,21 @@ class handler(requestsManager.asyncRequestHandler):
 			beatmapInfo.setDataFromDB(s.fileMd5)
 
 			# Make sure the beatmap is submitted and updated
-			if beatmapInfo.rankedStatus in (
-				rankedStatuses.NOT_SUBMITTED, rankedStatuses.NEED_UPDATE, rankedStatuses.UNKNOWN
-			):
+			if beatmapInfo.rankedStatus == rankedStatuses.NOT_SUBMITTED or beatmapInfo.rankedStatus == rankedStatuses.NEED_UPDATE or beatmapInfo.rankedStatus == rankedStatuses.UNKNOWN:
 				log.debug("Beatmap is not submitted/outdated/unknown. Score submission aborted.")
 				return
 
+			# increment user playtime
+			length = 0
+			if s.passed:
+				try:
+					length = userUtils.getBeatmapTime(beatmapInfo.beatmapID)
+				except Exception:
+					log.error("Error while contacting mirror server.")
+			else:
+				length = math.ceil(int(self.get_argument("ft")) / 1000)
+
+			userUtils.incrementPlaytime(userID, s.gameMode, length)
 			# Calculate PP
 			midPPCalcException = None
 			try:
@@ -159,104 +162,116 @@ class handler(requestsManager.asyncRequestHandler):
 				s.pp = 0
 				midPPCalcException = e
 
-			# Restrict obvious cheaters
-			if (s.pp >= 700 and s.gameMode == gameModes.STD) and not restricted:
-				userUtils.restrict(userID)
-				userUtils.appendNotes(userID, "Restricted due to too high pp gain ({}pp)".format(s.pp))
-				log.warning("**{}** ({}) has been restricted due to too high pp gain **({}pp)**".format(username, userID, s.pp), "cm")
+			# Restrict obvious cheaters™
+			if not restricted:
+				if isRelaxing: # Relax
+					rxGods = [7340, 2137, 6868, 1215, 15066, 14522, 1325, 5798, 21610, 1254, 15070, 3445, 17157, 14791, 14728, 1366, 2961, 5524, 1188, 1401, 26754, 3388, 5692, 2173, 4299] # Yea yea it's a bad way of doing it; will fix.
+					"""
+					CTBLIST = []
+					TAIKOLIST = []
+					"""
+					if s.gameMode == gameModes.STD and userID not in rxGods:
+						if (s.pp >= 1100) and used_mods & 1024 and userID != 17547: # MBMasher plays too much FL; make him an exception just incase.
+							userUtils.restrict(userID)
+							userUtils.appendNotes(userID, "[osu!] Restricted due to too high pp gain with FLASHLIGHT ({}pp).".format(s.pp))
+							log.warning("[osu!] **{}** ({}) has been restricted due to too high pp gain with FLASHLIGHT **({}pp)**.".format(username, userID, s.pp), "cm")
+						elif (s.pp >= 1600):
+							userUtils.restrict(userID)
+							userUtils.appendNotes(userID, "[osu!] Restricted due to too high pp gain ({}pp).".format(s.pp))
+							log.warning("[osu!] **{}** ({}) has been restricted due to too high pp gain **({}pp)**.".format(username, userID, s.pp), "cm")
+					elif (s.pp >= 1000) and s.gameMode == gameModes.TAIKO:
+						userUtils.restrict(userID)
+						userUtils.appendNotes(userID, "[osu!taiko] Restricted due to too high pp gain ({}pp).".format(s.pp))
+						log.warning("[osu!taiko] **{}** ({}) has been restricted due to too high pp gain **({}pp)**.".format(username, userID, s.pp), "cm")
+					elif (s.pp >= 1350) and s.gameMode == gameModes.CTB:
+						userUtils.restrict(userID)
+						userUtils.appendNotes(userID, "[osu!catch] Restricted due to too high pp gain ({}pp).".format(s.pp))
+						log.warning("[osu!catch] **{}** ({}) has been restricted due to too high pp gain **({}pp)**.".format(username, userID, s.pp), "cm")
+				else: # Vanilla
+					if s.gameMode == gameModes.STD:
+						if (s.pp >= 500) and used_mods & 1024:
+							userUtils.restrict(userID)
+							userUtils.appendNotes(userID, "[osu!] Restricted due to too high pp gain with FLASHLIGHT ({}pp).".format(s.pp))
+							log.warning("[osu!] **{}** ({}) has been restricted due to too high pp gain with FLASHLIGHT **({}pp)**.".format(username, userID, s.pp), "cm")
+						elif (s.pp >= 700):
+							userUtils.restrict(userID)
+							userUtils.appendNotes(userID, "[osu!] Restricted due to too high pp gain ({}pp).".format(s.pp))
+							log.warning("[osu!] **{}** ({}) has been restricted due to too high pp gain **({}pp)**.".format(username, userID, s.pp), "cm")
+						"""
+					elif (s.pp >= 10000) and s.gameMode == gameModes.TAIKO:
+						userUtils.restrict(userID)
+						userUtils.appendNotes(userID, "[osu!taiko] Restricted due to too high pp gain ({}pp).".format(s.pp))
+						log.warning("[osu!taiko] **{}** ({}) has been restricted due to too high pp gain **({}pp)**.".format(username, userID, s.pp), "cm")
+					elif s.pp >= 10000) and (s.gameMode == gameModes.CTB:
+						userUtils.restrict(userID)
+						userUtils.appendNotes(userID, "[osu!catch] Restricted due to too high pp gain ({}pp).".format(s.pp))
+						log.warning("[osu!catch] **{}** ({}) has been restricted due to too high pp gain **({}pp)**.".format(username, userID, s.pp), "cm")
+						"""
 
-			# Check notepad hack
-			if bmk is None and bml is None:
-				# No bmk and bml params passed, edited or super old client
-				#log.warning("{} ({}) most likely submitted a score from an edited client or a super old client".format(username, userID), "cm")
-				pass
-			elif bmk != bml and not restricted:
-				# bmk and bml passed and they are different, restrict the user
-				userUtils.restrict(userID)
-				userUtils.appendNotes(userID, "Restricted due to notepad hack")
-				log.warning("**{}** ({}) has been restricted due to notepad hack".format(username, userID), "cm")
-				return
+				# Make sure the score is not memed
+				if s.gameMode == gameModes.MANIA and s.score > 1000000:
+					userUtils.ban(userID)
+					userUtils.appendNotes(userID, "Banned due to mania score > 1000000.")
 
-			# Right before submitting the score, get the personal best score object (we need it for charts)
+				# Ci metto la faccia, ci metto la testa e ci metto il mio cuore
+				if ((s.mods & mods.DOUBLETIME) > 0 and (s.mods & mods.HALFTIME) > 0) \
+						or ((s.mods & mods.HARDROCK) > 0 and (s.mods & mods.EASY) > 0) \
+						or ((s.mods & mods.SUDDENDEATH) > 0 and (s.mods & mods.NOFAIL) > 0) \
+						or ((s.mods & mods.RELAX) > 0 and (s.mods & mods.RELAX2) > 0):
+					userUtils.ban(userID)
+					userUtils.appendNotes(userID, "Impossible mod combination ({}).".format(s.mods))
+
+				# Check notepad hack
+				if bmk is None and bml is None:
+					# No bmk and bml params passed, edited or super old client
+					#log.warning("{} ({}) most likely submitted a score from an edited client or a super old client".format(username, userID), "cm")
+					pass
+				elif bmk != bml:
+					# bmk and bml passed and they are different, restrict the user
+					userUtils.restrict(userID)
+					userUtils.appendNotes(userID, "Restricted due to notepad hack")
+					log.warning("**{}** ({}) has been restricted due to notepad hack".format(username, userID), "cm")
+					return
+
+				# Right before submitting the score, get the personal best score object (we need it for charts)
 			if s.passed and s.oldPersonalBest > 0:
-				# We have an older personal best. Get its rank (try to get it from cache first)
-				oldPersonalBestRank = glob.personalBestCache.get(userID, s.fileMd5)
-				if oldPersonalBestRank == 0:
-					# oldPersonalBestRank not found in cache, get it from db through a scoreboard object
-					oldScoreboard = scoreboard.scoreboard(username, s.gameMode, beatmapInfo, False)
-					oldScoreboard.setPersonalBestRank()
-					oldPersonalBestRank = max(oldScoreboard.personalBestRank, 0)
-				oldPersonalBest = score.score(s.oldPersonalBest, oldPersonalBestRank)
+					oldPersonalBestRank = glob.personalBestCache.get(userID, s.fileMd5)
+					if oldPersonalBestRank == 0:
+						oldScoreboard = scoreboard.scoreboard(username, s.gameMode, beatmapInfo, False)
+						oldScoreboard.setPersonalBestRank()
+						oldPersonalBestRank = max(oldScoreboard.personalBestRank, 0)
+					oldPersonalBest = score.score(s.oldPersonalBest, oldPersonalBestRank)
 			else:
-				oldPersonalBestRank = 0
-				oldPersonalBest = None
+					oldPersonalBestRank = 0
+					oldPersonalBest = None
 
 			# Save score in db
 			s.saveScoreInDB()
 
-			# Remove lock as we have the score in the database at this point
-			# and we can perform duplicates check through MySQL
-			log.debug("Resetting score lock key {}".format(lock_key))
-			glob.redis.delete(lock_key)
+			if not restricted:
+				# Client anti-cheat flags
+				haxFlags = scoreData[17].count(' ') # 4 is normal, 0 is irregular but inconsistent.
+				if haxFlags != 4 and haxFlags != 0 and s.completed > 1:
 
-			# Client anti-cheat flags
-			'''ignoreFlags = 4
-			if glob.debug:
-				# ignore multiple client flags if we are in debug mode
-				ignoreFlags |= 8
-			haxFlags = (len(scoreData[17])-len(scoreData[17].strip())) & ~ignoreFlags
-			if haxFlags != 0 and not restricted:
-				userHelper.restrict(userID)
-				userHelper.appendNotes(userID, "-- Restricted due to clientside anti cheat flag ({}) (cheated score id: {})".format(haxFlags, s.scoreID))
-				log.warning("**{}** ({}) has been restricted due clientside anti cheat flag **({})**".format(username, userID, haxFlags), "cm")'''
+					flagsReadable = generalUtils.calculateFlags(int(haxFlags), used_mods, s.gameMode)
+					if len(flagsReadable) > 1:
+						userUtils.appendNotes(userID, "-- has received clientside flags: {} [{}] (cheated score id: {})".format(haxFlags, flagsReadable, s.scoreID))
+						log.warning("**{}** (https://akatsuki.pw/{relax}u/{}) has received clientside anti cheat flags.\n\nFlags: {}.\n[{}]\n\nScore ID: {scoreID}\nReplay: https://akatsuki.pw/web/replays/{scoreID}".format(username, userID, haxFlags, flagsReadable, scoreID=s.scoreID, relax="rx/" if isRelaxing else ""), "cm")
 
-			# Mi stavo preparando per scendere
-			# Mi stavo preparando per comprare i dolci
-			# Oggi e' il compleanno di mio nipote
-			# Dovevamo festeggiare staseraaaa
-			# ----
-			# Da un momento all'altro ho sentito una signora
-			# Correte, correte se ne e' sceso un muro
-			# Da un momento all'altro ho sentito una signora
-			# Correte, correte se ne e' sceso un muro
-			# --- (io sto angora in ganottier ecche qua) ---
-			# Sono scesa e ho visto ilpalazzochesenee'caduto
-			# Ho preso a mio cognato, che stava svenuto
-			# Mia figlia e' scesa, mia figlia ha urlato
-			# "C'e' qualcuno sotto, C'e' qualcuno sotto"
-			# "C'e' qualcuno sotto, C'e' qualcuno sottoooooooooo"
-			# --- (scusatm che sto angor emozzionat non parlo ancora moltobbene) ---
-			# Da un momento all'altro ho sentito una signora
-			# Correte, correte se ne e' sceso un muro
-			# Da un momento all'altro ho sentito una signora
-			# Correte, correte se ne e' sceso un muro
-			# -- THIS IS THE PART WITH THE GOOD SOLO (cit <3) --
-			# Vedete quel palazzo la' vicino
-			# Se ne sta scendendo un po' alla volta
-			# Piano piano, devono prendere provvedimenti
-			# Al centro qua hanno fatto una bella ristrututuitriazione
-			# Hanno mess le panghina le fondane iffiori
-			# LALALALALALALALALA
-			if s.score < 0 or s.score > (2 ** 63) - 1:
-				userUtils.ban(userID)
-				userUtils.appendNotes(userID, "Banned due to negative score (score submitter)")
+				if s.score < 0 or s.score > (2 ** 63) - 1:
+					userUtils.ban(userID)
+					userUtils.appendNotes(userID, "Banned due to negative score.")
 
-			# Make sure the score is not memed
-			if s.gameMode == gameModes.MANIA and s.score > 1000000:
-				userUtils.ban(userID)
-				userUtils.appendNotes(userID, "Banned due to mania score > 1000000 (score submitter)")
+				if s.completed == 3: # just incase :)!
+					if (s.score - (s.c300 * 300 + s.c100 * 100 + s.c50 * 50)) < 0 and not isRelaxing and s.gameMode == 0:
+						#userUtils.ban(userID)
+						#userUtils.appendNotes(userID, "Banned due to score being less than no-combo value.")
+						log.hoshio("{} (https://akatsuki.pw/{relax}u/{}) has submitted a score where score is less than no-combo value. (scoreID: {}, score: {}, pp:{})".format(username, userID, s.scoreID, s.score, s.pp, relax="rx/" if isRelaxing else ""), discord="cm")
 
-			# Ci metto la faccia, ci metto la testa e ci metto il mio cuore
-			if ((s.mods & mods.DOUBLETIME) > 0 and (s.mods & mods.HALFTIME) > 0) \
-					or ((s.mods & mods.HARDROCK) > 0 and (s.mods & mods.EASY) > 0)\
-					or ((s.mods & mods.SUDDENDEATH) > 0 and (s.mods & mods.NOFAIL) > 0):
-				userUtils.ban(userID)
-				userUtils.appendNotes(userID, "Impossible mod combination {} (score submitter)".format(s.mods))
+					if s.fullCombo and s.cMiss > 0:
+						log.hoshio("{} (https://akatsuki.pw/{relax}u/{}) has submitted a score with 'fullCombo' flag, but has > 0 misses. (scoreID: {}, score: {}, pp:{})".format(username, userID, s.scoreID, s.score, s.pp, relax="rx/" if isRelaxing else ""), discord="cm")
 
 			# NOTE: Process logging was removed from the client starting from 20180322
-			if s.completed == 3 and "pl" in self.request.arguments:
-				butterCake.bake(self, s)
-
 			# Save replay for all passed scores
 			# Make sure the score has an id as well (duplicated?, query error?)
 			if s.passed and s.scoreID > 0:
@@ -264,40 +279,61 @@ class handler(requestsManager.asyncRequestHandler):
 					# Save the replay if it was provided
 					log.debug("Saving replay ({})...".format(s.scoreID))
 					replay = self.request.files["score"][0]["body"]
-					with open("{}/replay_{}.osr".format(glob.conf.config["server"]["replayspath"], s.scoreID), "wb") as f:
+					with open(".data/replays/replay_{}.osr".format(s.scoreID), "wb") as f:
 						f.write(replay)
 
 					# Send to cono ALL passed replays, even non high-scores
 					if glob.conf.config["cono"]["enable"]:
+						if isRelaxing:
+							threading.Thread(target=lambda: glob.redis.publish(
+								"cono:analyze", json.dumps({
+									"score_id": s.scoreID,
+									"beatmap_id": beatmapInfo.beatmapID,
+									"user_id": s.playerUserID,
+									"game_mode": s.gameMode,
+									"pp": s.pp,
+									"replay_data": base64.b64encode(
+										replayHelper.rxbuildFullReplay(
+											s.scoreID,
+											rawReplay=self.request.files["score"][0]["body"]
+										)
+									).decode(),
+								})
+							)).start()
+						else:
 						# We run this in a separate thread to avoid slowing down scores submission,
 						# as cono needs a full replay
-						threading.Thread(target=lambda: glob.redis.publish(
-							"cono:analyze", json.dumps({
-								"score_id": s.scoreID,
-								"beatmap_id": beatmapInfo.beatmapID,
-								"user_id": s.playerUserID,
-								"game_mode": s.gameMode,
-								"pp": s.pp,
-								"replay_data": base64.b64encode(
-									replayHelper.buildFullReplay(
-										s.scoreID,
-										rawReplay=self.request.files["score"][0]["body"]
-									)
-								).decode(),
-							})
-						)).start()
+							threading.Thread(target=lambda: glob.redis.publish(
+								"cono:analyze", json.dumps({
+									"score_id": s.scoreID,
+									"beatmap_id": beatmapInfo.beatmapID,
+									"user_id": s.playerUserID,
+									"game_mode": s.gameMode,
+									"pp": s.pp,
+									"replay_data": base64.b64encode(
+										replayHelper.buildFullReplay(
+											s.scoreID,
+											rawReplay=self.request.files["score"][0]["body"]
+										)
+									).decode(),
+								})
+							)).start()
 				else:
 					# Restrict if no replay was provided
 					if not restricted:
 						userUtils.restrict(userID)
-						userUtils.appendNotes(userID, "Restricted due to missing replay while submitting a score "
-													  "(most likely he used a score submitter)")
-						log.warning("**{}** ({}) has been restricted due to replay not found on map {}".format(
+						userUtils.appendNotes(userID, "Restricted due to missing replay while submitting a score.")
+						log.warning("**{}** ({}) has been restricted due to not submitting a replay on map {}.".format(
 							username, userID, s.fileMd5
 						), "cm")
 
 			# Update beatmap playcount (and passcount)
 			beatmap.incrementPlaycount(s.fileMd5, s.passed)
+
+			# Print out score submission
+			songNameFull = beatmapInfo.songName.encode().decode("ASCII", "ignore")
+			songNameShort = songNameFull[:48]+"..." if len(songNameFull) > 48 else songNameFull[:-4]
+			log.info("[{}] {} has submitted a score on {}...".format("RELAX" if isRelaxing else "VANILLA", username, songNameShort))
 
 			# Let the api know of this score
 			if s.scoreID:
@@ -311,27 +347,43 @@ class handler(requestsManager.asyncRequestHandler):
             # If there was no exception, update stats and build score submitted panel
 			# Get "before" stats for ranking panel (only if passed)
 			if s.passed:
-				# Get old stats and rank
-				oldUserStats = glob.userStatsCache.get(userID, s.gameMode)
-				oldRank = userUtils.getGameRank(userID, s.gameMode)
+				# Get stats and rank
+				if isRelaxing:
+					oldUserData = glob.userStatsCache.rxget(userID, s.gameMode)
+					oldRank = userUtils.rxgetGameRank(userID, s.gameMode)
+				else:
+					oldUserData = glob.userStatsCache.get(userID, s.gameMode)
+					oldRank = userUtils.getGameRank(userID, s.gameMode)
 
 			# Always update users stats (total/ranked score, playcount, level, acc and pp)
 			# even if not passed
-			log.debug("Updating {}'s stats...".format(username))
-			userUtils.updateStats(userID, s)
+
+			log.debug("[{}] Updating {}'s stats...".format("RELAX" if isRelaxing else "VANILLA", username))
+			if isRelaxing:
+				userUtils.rxupdateStats(userID, s)
+			else:
+				userUtils.updateStats(userID, s)
 
 			# Get "after" stats for ranking panel
 			# and to determine if we should update the leaderboard
 			# (only if we passed that song)
 			if s.passed:
 				# Get new stats
-				newUserStats = userUtils.getUserStats(userID, s.gameMode)
-				glob.userStatsCache.update(userID, s.gameMode, newUserStats)
+				if isRelaxing:
+					newUserData = userUtils.getRelaxStats(userID, s.gameMode)
+					glob.userStatsCache.rxupdate(userID, s.gameMode, newUserData)
+				else:
+					newUserData = userUtils.getUserStats(userID, s.gameMode)
+					glob.userStatsCache.update(userID, s.gameMode, newUserData)
 
 				# Update leaderboard (global and country) if score/pp has changed
-				if s.completed == 3 and newUserStats["pp"] != oldUserStats["pp"]:
-					leaderboardHelper.update(userID, newUserStats["pp"], s.gameMode)
-					leaderboardHelper.updateCountry(userID, newUserStats["pp"], s.gameMode)
+				if s.completed == 3 and newUserData["pp"] != oldUserData["pp"]:
+					if isRelaxing:
+						leaderboardHelper.rxupdate(userID, newUserData["pp"], s.gameMode)
+						leaderboardHelper.rxupdateCountry(userID, newUserData["pp"], s.gameMode)
+					else:
+						leaderboardHelper.update(userID, newUserData["pp"], s.gameMode)
+						leaderboardHelper.updateCountry(userID, newUserData["pp"], s.gameMode)
 
 			# TODO: Update total hits and max combo
 			# Update latest activity
@@ -349,27 +401,39 @@ class handler(requestsManager.asyncRequestHandler):
 
 			# At the end, check achievements
 			if s.passed:
-				new_achievements = secret.achievements.utils.unlock_achievements(s, beatmapInfo, newUserStats)
+				new_achievements = secret.achievements.utils.unlock_achievements(s, beatmapInfo, newUserData)
 
 			# Output ranking panel only if we passed the song
 			# and we got valid beatmap info from db
 			if beatmapInfo is not None and beatmapInfo != False and s.passed:
-				log.debug("Started building ranking panel")
+				log.debug("Started building ranking panel.")
 
-				# Trigger bancho stats cache update
-				glob.redis.publish("peppy:update_cached_stats", userID)
+				if isRelaxing: # Relax
+					# Trigger bancho stats cache update
+					glob.redis.publish("peppy:update_rxcached_stats", userID)
 
-				# Get personal best after submitting the score
-				newScoreboard = scoreboard.scoreboard(username, s.gameMode, beatmapInfo, False)
-				newScoreboard.setPersonalBestRank()
-				personalBestID = newScoreboard.getPersonalBestID()
-				assert personalBestID is not None
-				currentPersonalBest = score.score(personalBestID, newScoreboard.personalBestRank)
+					newScoreboard = relaxboard.scoreboard(username, s.gameMode, beatmapInfo, False)
+					newScoreboard.setPersonalBestRank()
+					personalBestID = newScoreboard.getPersonalBestID()
+					assert personalBestID is not None
+					currentPersonalBest = rxscore.score(personalBestID, newScoreboard.personalBestRank)
 
-				# Get rank info (current rank, pp/score to next rank, user who is 1 rank above us)
-				rankInfo = leaderboardHelper.getRankInfo(userID, s.gameMode)
+					# Get rank info (current rank, pp/score to next rank, user who is 1 rank above us)
+					rankInfo = leaderboardHelper.rxgetRankInfo(userID, s.gameMode)
 
-				# Output dictionary
+				else: # Vanilla
+					# Trigger bancho stats cache update
+					glob.redis.publish("peppy:update_cached_stats", userID)
+
+					newScoreboard = scoreboard.scoreboard(username, s.gameMode, beatmapInfo, False)
+					newScoreboard.setPersonalBestRank()
+					personalBestID = newScoreboard.getPersonalBestID()
+					assert personalBestID is not None
+					currentPersonalBest = score.score(personalBestID, newScoreboard.personalBestRank)
+
+					# Get rank info (current rank, pp/score to next rank, user who is 1 rank above us)
+					rankInfo = leaderboardHelper.getRankInfo(userID, s.gameMode)
+
 				if newCharts:
 					log.debug("Using new charts")
 					dicts = [
@@ -386,7 +450,7 @@ class handler(requestsManager.asyncRequestHandler):
 							beatmapInfo.beatmapID,
 						),
 						OverallChart(
-							userID, oldUserStats, newUserStats, s, new_achievements, oldRank, rankInfo["currentRank"]
+							userID, oldUserData, newUserData, beatmapInfo, s, new_achievements, oldRank, rankInfo["currentRank"]
 						)
 					]
 				else:
@@ -405,13 +469,13 @@ class handler(requestsManager.asyncRequestHandler):
 							("chartEndDate", ""),
 							("beatmapRankingBefore", oldPersonalBestRank),
 							("beatmapRankingAfter", newScoreboard.personalBestRank),
-							("rankedScoreBefore", oldUserStats["rankedScore"]),
-							("rankedScoreAfter", newUserStats["rankedScore"]),
-							("totalScoreBefore", oldUserStats["totalScore"]),
-							("totalScoreAfter", newUserStats["totalScore"]),
-							("playCountBefore", newUserStats["playcount"]),
-							("accuracyBefore", float(oldUserStats["accuracy"])/100),
-							("accuracyAfter", float(newUserStats["accuracy"])/100),
+							("rankedScoreBefore", oldUserData["rankedScore"]),
+							("rankedScoreAfter", newUserData["rankedScore"]),
+							("totalScoreBefore", oldUserData["totalScore"]),
+							("totalScoreAfter", newUserData["totalScore"]),
+							("playCountBefore", newUserData["playcount"]),
+							("accuracyBefore", float(oldUserData["accuracy"])/100),
+							("accuracyAfter", float(newUserData["accuracy"])/100),
 							("rankBefore", oldRank),
 							("rankAfter", rankInfo["currentRank"]),
 							("toNextRank", rankInfo["difference"]),
@@ -423,13 +487,13 @@ class handler(requestsManager.asyncRequestHandler):
 					]
 				output = "\n".join(zingonify(x) for x in dicts)
 
-				# Some debug messages
 				log.debug("Generated output for online ranking screen!")
 				log.debug(output)
 
-				# send message to #announce if we're rank #1
+				# Send message to #announce if we're rank #1
 				if newScoreboard.personalBestRank == 1 and s.completed == 3 and not restricted:
-					annmsg = "[https://ripple.moe/?u={} {}] achieved rank #1 on [https://osu.ppy.sh/b/{} {}] ({})".format(
+					annmsg = "[{}] [https://akatsuki.pw/u/{} {}] achieved rank #1 on [https://osu.ppy.sh/b/{} {}] ({})".format(
+						"RELAX" if isRelaxing else "VANILLA",
 						userID,
 						username.encode().decode("ASCII", "ignore"),
 						beatmapInfo.beatmapID,
@@ -438,6 +502,9 @@ class handler(requestsManager.asyncRequestHandler):
 					)
 					params = urlencode({"k": glob.conf.config["server"]["apikey"], "to": "#announce", "msg": annmsg})
 					requests.get("{}/api/v1/fokabotMessage?{}".format(glob.conf.config["server"]["banchourl"], params))
+
+					# Add the #1 to the database. Yes this is spaghetti.
+					scoreUtils.newFirst(s.scoreID, userID, s.fileMd5, s.gameMode, isRelaxing)
 
 				# Write message to client
 				self.write(output)
