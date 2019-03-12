@@ -3,37 +3,32 @@
 from common.constants import bcolors
 from objects import glob
 
-ASCII = """ (                 (     
- )\\ )        *   ) )\\ )  
-(()/(  (   ` )  /((()/(  
- /(_)) )\\   ( )(_))/(_)) 
-(_))  ((_) (_(_())(_))   
-| |   | __||_   _|/ __|  
-| |__ | _|   | |  \\__ \\  
-|____||___|  |_|  |___/  \n"""
 
 def printServerStartHeader(asciiArt):
 	"""
 	Print server start header with optional ascii art
-
 	asciiArt -- if True, will print ascii art too
 	"""
 
 	if asciiArt:
-		ascii_list = ASCII.split("\n")
-		for i, x in enumerate(ascii_list):
-			printColored(x, bcolors.YELLOW if i < len(ascii_list) - 4 else bcolors.GREEN)
+		printColored(" (                 (     ", bcolors.YELLOW)
+		printColored(" )\\ )        *   ) )\\ )  ", bcolors.YELLOW)
+		printColored("(()/(  (   ` )  /((()/(  ", bcolors.YELLOW)
+		printColored(" /(_)) )\\   ( )(_))/(_)) ", bcolors.YELLOW)
+		printColored("(_))  ((_) (_(_())(_))   ", bcolors.YELLOW)
+		printColored("| |   | __||_   _|/ __|  ", bcolors.GREEN)
+		printColored("| |__ | _|   | |  \\__ \\  ", bcolors.GREEN)
+		printColored("|____||___|  |_|  |___/  \n", bcolors.GREEN)
 
 	printColored("> Welcome to the Latest Essential Tatoe Server v{}".format(glob.VERSION), bcolors.GREEN)
-	printColored("> Made by the Ripple team", bcolors.GREEN)
-	printColored("> {}https://zxq.co/ripple/lets".format(bcolors.UNDERLINE), bcolors.GREEN)
+	printColored("> Made by the Ripple and Vipsu teams", bcolors.GREEN)
+	printColored("> {}https://github.com/osuAkatsuki/lets".format(bcolors.UNDERLINE), bcolors.GREEN)
 	printColored("> Press CTRL+C to exit\n", bcolors.GREEN)
 
 
 def printNoNl(string):
 	"""
 	Print string without new line at the end
-
 	string -- string to print
 	"""
 
@@ -43,7 +38,6 @@ def printNoNl(string):
 def printColored(string, color):
 	"""
 	Print colored string
-
 	string -- string to print
 	color -- see bcolors.py
 	"""
