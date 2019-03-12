@@ -1,6 +1,5 @@
 import time
 
-from common.constants import gameModes
 from common.log import logUtils as log
 from constants import rankedStatuses
 from helpers import osuapiHelper
@@ -8,9 +7,9 @@ from objects import glob
 
 
 class beatmap:
-	__slots__ = ("songName", "fileMD5", "rankedStatus", "rankedStatusFrozen", "beatmapID", "beatmapSetID", "offset",
+	__slots__ = ["songName", "fileMD5", "rankedStatus", "rankedStatusFrozen", "beatmapID", "beatmapSetID", "offset",
 	             "rating", "starsStd", "starsTaiko", "starsCtb", "starsMania", "AR", "OD", "maxCombo", "hitLength",
-	             "bpm", "playcount" ,"passcount", "refresh", "disablePP")
+	             "bpm", "playcount" ,"passcount", "refresh"]
 
 	def __init__(self, md5 = None, beatmapSetID = None, gameMode = 0, refresh=False):
 		"""
@@ -26,9 +25,9 @@ class beatmap:
 		self.beatmapID = 0
 		self.beatmapSetID = 0
 		self.offset = 0		# Won't implement
-		self.rating = 0.
+		self.rating = .0
 
-		self.starsStd = 0.0		# stars for converted
+		self.starsStd = 0.0	# stars for converted
 		self.starsTaiko = 0.0	# stars for converted
 		self.starsCtb = 0.0		# stars for converted
 		self.starsMania = 0.0	# stars for converted
@@ -37,7 +36,6 @@ class beatmap:
 		self.maxCombo = 0
 		self.hitLength = 0
 		self.bpm = 0
-		self.disablePP = False
 
 		# Statistics for ranking panel
 		self.playcount = 0
@@ -53,57 +51,26 @@ class beatmap:
 		Add current beatmap data in db if not in yet
 		"""
 		# Make sure the beatmap is not already in db
-		bdata = glob.db.fetch(
-			"SELECT id, ranked_status_freezed, ranked, disable_pp FROM beatmaps "
-			"WHERE beatmap_md5 = %s OR beatmap_id = %s LIMIT 1",
-			(self.fileMD5, self.beatmapID)
-		)
+		bdata = glob.db.fetch("SELECT id, ranked_status_freezed, ranked FROM beatmaps WHERE beatmap_md5 = %s OR beatmap_id = %s LIMIT 1", [self.fileMD5, self.beatmapID])
 		if bdata is not None:
 			# This beatmap is already in db, remove old record
 			# Get current frozen status
 			frozen = bdata["ranked_status_freezed"]
-			if frozen:
+			if frozen == 1:
 				self.rankedStatus = bdata["ranked"]
-			self.disablePP = bdata["disable_pp"]
 			log.debug("Deleting old beatmap data ({})".format(bdata["id"]))
 			glob.db.execute("DELETE FROM beatmaps WHERE id = %s LIMIT 1", [bdata["id"]])
+			if self.beatmapID == 1816169:
+				log.cmyui("0: {}".format(self.beatmapID), discord="cm")
 		else:
 			# Unfreeze beatmap status
-			frozen = False
-
-		# Unrank broken approved/qualified/loved maps
-		if not self.disablePP and self.rankedStatus >= rankedStatuses.APPROVED:
-			from objects.score import PerfectScoreFactory
-			# Calculate PP for every game mode
-			log.debug("Caching A/Q/L map ({}). Checking if it's broken.".format(self.fileMD5))
-			for gameMode in (
-				range(gameModes.STD, gameModes.MANIA) if not self.is_mode_specific
-				else (self.specific_game_mode,)
-			):
-				log.debug("Calculating A/Q/L pp for beatmap {}, mode {}".format(self.fileMD5, gameMode))
-				s = PerfectScoreFactory.create(self, game_mode=gameMode)
-				s.calculatePP(self)
-				if s.pp == 0:
-					log.warning("Got 0.0pp while checking A/Q/L pp for beatmap {}".format(self.fileMD5))
-
-				if s.pp >= glob.aqlThresholds[gameMode]:
-					# More pp than the threshold
-					self.disablePP = True
-					break
-
-		if self.disablePP:
-			# dont()
-			log.info("Disabling PP on broken A/Q/L map {}".format(self.fileMD5))
-			self.disablePP = True
-			glob.db.execute("UPDATE scores SET pp = 0 WHERE beatmap_md5 = %s", (self.fileMD5,))
+			frozen = 0
+			if self.beatmapID == 1816169:
+				log.cmyui("1: {}".format(self.beatmapID), discord="cm")
 
 		# Add new beatmap data
 		log.debug("Saving beatmap data in db...")
-		glob.db.execute(
-			"INSERT INTO `beatmaps` (`id`, `beatmap_id`, `beatmapset_id`, `beatmap_md5`, `song_name`, "
-			"`ar`, `od`, `difficulty_std`, `difficulty_taiko`, `difficulty_ctb`, `difficulty_mania`, "
-			"`max_combo`, `hit_length`, `bpm`, `ranked`, `latest_update`, `ranked_status_freezed`, `disable_pp`) "
-			"VALUES (NULL, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)", (
+		glob.db.execute("INSERT INTO `beatmaps` (`id`, `beatmap_id`, `beatmapset_id`, `beatmap_md5`, `song_name`, `ar`, `od`, `difficulty_std`, `difficulty_taiko`, `difficulty_ctb`, `difficulty_mania`, `max_combo`, `hit_length`, `bpm`, `ranked`, `latest_update`, `ranked_status_freezed`) VALUES (NULL, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);", [
 			self.beatmapID,
 			self.beatmapSetID,
 			self.fileMD5,
@@ -117,11 +84,12 @@ class beatmap:
 			self.maxCombo,
 			self.hitLength,
 			self.bpm,
-			self.rankedStatus if not frozen else 2,
+			self.rankedStatus if frozen == 0 else 2,
 			int(time.time()),
-			frozen,
-			self.disablePP
-		))
+			frozen
+		])
+		if self.beatmapID == 1816169:
+			log.cmyui("2: {}".format(self.beatmapID), discord="cm")
 
 	def setDataFromDB(self, md5):
 		"""
@@ -150,13 +118,14 @@ class beatmap:
 			expire *= 3
 
 		# Make sure the beatmap data in db is not too old
-		if int(expire) > 0 and time.time() > data["latest_update"]+int(expire) and not data["ranked_status_freezed"]:
+		if int(expire) > 0 and time.time() > data["latest_update"]+int(expire):
+			if data["ranked_status_freezed"] == 1:
+				self.setDataFromDict(data)
 			return False
 
 		# Data in DB, set beatmap data
 		log.debug("Got beatmap data from db")
 		self.setDataFromDict(data)
-		self.rating = data["rating"]	# db only, we don't want the rating from osu! api.
 		return True
 
 	def setDataFromDict(self, data):
@@ -181,7 +150,6 @@ class beatmap:
 		self.maxCombo = int(data["max_combo"])
 		self.hitLength = int(data["hit_length"])
 		self.bpm = int(data["bpm"])
-		self.disablePP = bool(data["disable_pp"])
 		# Ranking panel statistics
 		self.playcount = int(data["playcount"]) if "playcount" in data else 0
 		self.passcount = int(data["passcount"]) if "passcount" in data else 0
@@ -307,16 +275,11 @@ class beatmap:
 
 		return -- beatmap header for getscores
 		"""
-		rankedStatusOutput = self.rankedStatus
-
-		# Force approved for A/Q/L beatmaps that give PP, so we don't get the alert in game
-		if self.rankedStatus >= rankedStatuses.APPROVED and self.is_rankable:
-			rankedStatusOutput = rankedStatuses.APPROVED
-
 		# Fix loved maps for old clients
 		if version < 4 and self.rankedStatus == rankedStatuses.LOVED:
 			rankedStatusOutput = rankedStatuses.QUALIFIED
-
+		else:
+			rankedStatusOutput = self.rankedStatus
 		data = "{}|false".format(rankedStatusOutput)
 		if self.rankedStatus != rankedStatuses.NOT_SUBMITTED and self.rankedStatus != rankedStatuses.NEED_UPDATE and self.rankedStatus != rankedStatuses.UNKNOWN:
 			# If the beatmap is updated and exists, the client needs more data
@@ -347,28 +310,7 @@ class beatmap:
 
 	@property
 	def is_rankable(self):
-		return self.rankedStatus >= rankedStatuses.RANKED \
-			   and self.rankedStatus != rankedStatuses.UNKNOWN \
-			   and not self.disablePP
-
-	@property
-	def is_mode_specific(self):
-		return sum(x > 0 for x in (self.starsStd, self.starsTaiko, self.starsCtb, self.starsMania)) == 1
-
-	@property
-	def specific_game_mode(self):
-		if not self.is_mode_specific:
-			return None
-		try:
-			return next(
-				mode for mode, pp in zip(
-					(gameModes.STD, gameModes.TAIKO, gameModes.CTB, gameModes.MANIA),
-					(self.starsStd, self.starsTaiko, self.starsCtb, self.starsMania)
-				) if pp > 0
-			)
-		except StopIteration:
-			# FUBAR beatmap 🤔
-			return None
+		return self.rankedStatus >= rankedStatuses.RANKED and self.rankedStatus != rankedStatuses.UNKNOWN
 
 def convertRankedStatus(approvedStatus):
 	"""
@@ -399,9 +341,6 @@ def incrementPlaycount(md5, passed):
 	md5 -- beatmap md5
 	passed -- if True, increment passcount too
 	"""
-	glob.db.execute(
-		f"UPDATE beatmaps "
-		f"SET playcount = playcount+1{', passcount = passcount+1' if passed else ''} "
-		f"WHERE beatmap_md5 = %s LIMIT 1",
-		[md5]
-	)
+	glob.db.execute("UPDATE beatmaps SET playcount = playcount+1 WHERE beatmap_md5 = %s LIMIT 1", [md5])
+	if passed:
+		glob.db.execute("UPDATE beatmaps SET passcount = passcount+1 WHERE beatmap_md5 = %s LIMIT 1", [md5])
